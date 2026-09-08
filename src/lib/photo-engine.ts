@@ -124,9 +124,94 @@ function isSkin(r: number, g: number, b: number) {
   if (y < 32 || y > 245) return false;
   if (r < 35) return false;
   if (g > r + 18) return false;
-  if (cr < 122 || cr > 185) return false;
-  if (cb < 72 || cb > 142) return false;
+  if (chroma(r, g, b) < 32) return false;
+  if (cr < 128 || cr > 185) return false;
+  if (cb < 72 || cb > 140) return false;
   return true;
+}
+
+function chroma(r: number, g: number, b: number) {
+  return Math.max(r, g, b) - Math.min(r, g, b);
+}
+
+/**
+ * Sample the wall behind the head only. Bottom corners of a passport crop
+ * are almost always dark clothing, so they must not count as background.
+ */
+function sampleWallBackground(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+): { mean: number; std: number; rgb: Rgb; spread: number } {
+  const regions: Array<[number, number, number, number]> = [
+    [0, 0, width * 0.2, height * 0.16],
+    [width * 0.8, 0, width, height * 0.16],
+    [width * 0.32, 0, width * 0.68, height * 0.07],
+    [0, height * 0.06, width * 0.09, height * 0.45],
+    [width * 0.91, height * 0.06, width, height * 0.45],
+  ];
+
+  const lumas: number[] = [];
+  const pixels: Rgb[] = [];
+
+  for (const [x0, y0, x1, y1] of regions) {
+    const xa = Math.max(0, Math.floor(x0));
+    const ya = Math.max(0, Math.floor(y0));
+    const xb = Math.min(width - 1, Math.ceil(x1));
+    const yb = Math.min(height - 1, Math.ceil(y1));
+    for (let y = ya; y <= yb; y += 2) {
+      for (let x = xa; x <= xb; x += 2) {
+        const i = idx(x, y, width);
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        if (isSkin(r, g, b)) continue;
+        lumas.push(luma(r, g, b));
+        pixels.push({ r, g, b });
+      }
+    }
+  }
+
+  if (lumas.length < 8) {
+    const fallback = sampleRect(data, width, 0, 0, width * 0.16, height * 0.12);
+    return { mean: fallback.mean, std: fallback.std, rgb: fallback.rgb, spread: 0 };
+  }
+
+  const sorted = [...lumas].sort((a, b) => a - b);
+  const pivot = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.72))];
+  let sum = 0;
+  let sumSq = 0;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let count = 0;
+  let minY = 255;
+  let maxY = 0;
+
+  for (let i = 0; i < pixels.length; i += 1) {
+    if (Math.abs(lumas[i] - pivot) > 38) continue;
+    sum += lumas[i];
+    sumSq += lumas[i] * lumas[i];
+    r += pixels[i].r;
+    g += pixels[i].g;
+    b += pixels[i].b;
+    count += 1;
+    minY = Math.min(minY, lumas[i]);
+    maxY = Math.max(maxY, lumas[i]);
+  }
+
+  if (count === 0) {
+    const mean = pivot;
+    return { mean, std: 0, rgb: { r: mean, g: mean, b: mean }, spread: 0 };
+  }
+
+  const mean = sum / count;
+  return {
+    mean,
+    std: Math.sqrt(Math.max(0, sumSq / count - mean * mean)),
+    rgb: { r: r / count, g: g / count, b: b / count },
+    spread: maxY - minY,
+  };
 }
 
 export function findFaceBox(
@@ -227,21 +312,9 @@ export function analyzePhoto(
   extras?: { fileBytes?: number; mime?: string },
 ): PhotoAnalysis {
   const { width, height, data } = imageData;
-  const insetX = width * 0.12;
-  const insetY = height * 0.12;
-  const corners = [
-    sampleRect(data, width, 0, 0, insetX, insetY),
-    sampleRect(data, width, width - insetX, 0, width, insetY),
-    sampleRect(data, width, 0, height - insetY, insetX, height),
-    sampleRect(data, width, width - insetX, height - insetY, width, height),
-  ];
-  const backgroundLuma =
-    corners.reduce((sum, c) => sum + c.mean, 0) / corners.length;
-  const backgroundRgb = {
-    r: corners.reduce((s, c) => s + c.rgb.r, 0) / corners.length,
-    g: corners.reduce((s, c) => s + c.rgb.g, 0) / corners.length,
-    b: corners.reduce((s, c) => s + c.rgb.b, 0) / corners.length,
-  };
+  const wall = sampleWallBackground(data, width, height);
+  const backgroundLuma = wall.mean;
+  const backgroundRgb = wall.rgb;
 
   const faceRegion = sampleRect(
     data,
@@ -270,9 +343,9 @@ export function analyzePhoto(
   );
 
   const warmth = backgroundRgb.r - backgroundRgb.b;
-  const bgSpread = Math.max(...corners.map((c) => c.mean)) - Math.min(...corners.map((c) => c.mean));
-  const backgroundIsLight = backgroundLuma >= 168;
-  const faceBgGap = Math.abs(faceRegion.mean - backgroundLuma);
+  const bgSpread = wall.spread;
+  const backgroundIsLight = backgroundLuma >= 210;
+  const faceBgGap = backgroundLuma - faceRegion.mean;
   const sideDiff = Math.abs(left.mean - right.mean);
 
   let lightingIssue: PhotoAnalysis["lightingIssue"] = null;
@@ -296,13 +369,17 @@ export function analyzePhoto(
     check(
       "standout",
       "Face stands off the background",
-      faceBgGap < 28 || !backgroundIsLight ? "fail" : faceBgGap < 40 ? "warn" : "pass",
+      !backgroundIsLight || faceBgGap < 24
+        ? "fail"
+        : backgroundLuma < 235 || faceBgGap < 36
+          ? "warn"
+          : "pass",
       !backgroundIsLight
-        ? "Background is not light enough, so the face does not separate cleanly."
-        : faceBgGap < 28
+        ? "The wall behind the head is still grey or cream. It needs to be plain white."
+        : faceBgGap < 24
           ? "Face and background are too similar in brightness."
-          : "There is enough contrast between the face and the wall behind you.",
-      `gap ${Math.round(faceBgGap)}`,
+          : "The face is clearly darker than a light wall, so features separate cleanly.",
+      `wall ${Math.round(backgroundLuma)} · gap ${Math.round(faceBgGap)}`,
     ),
     check(
       "even",
@@ -316,12 +393,12 @@ export function analyzePhoto(
     check(
       "background",
       "Light / white background",
-      backgroundIsLight && bgSpread < 28 ? "pass" : backgroundLuma >= 140 ? "warn" : "fail",
+      backgroundIsLight && bgSpread < 32 ? "pass" : backgroundLuma >= 170 ? "warn" : "fail",
       backgroundIsLight
-        ? bgSpread >= 28
-          ? "The wall is light but uneven — shadows or a colour cast are still visible."
-          : "Corner samples look like a light backdrop."
-        : "Stand farther from a plain white wall. Grey, cream, or shadowed walls fail this check.",
+        ? bgSpread >= 32
+          ? "The wall is light but uneven — a leftover shadow or colour cast is still visible."
+          : "The area behind the head reads as a plain light backdrop."
+        : "Grey, cream, or shadowed walls fail Passport Seva. Use Whiten background to push that wall to white.",
       `${Math.round(backgroundLuma)} luma`,
     ),
     check(
@@ -403,7 +480,7 @@ export function suggestAdjustments(analysis: PhotoAnalysis): Adjustments {
 
   const evenLight = clamp((analysis.rightLuma - analysis.leftLuma) / 36, -1, 1);
 
-  const whiteBackground = analysis.backgroundLuma >= 132 ? 0.94 : 0;
+  const whiteBackground = 1;
 
   return { exposure, contrast, evenLight, whiteBackground };
 }
@@ -413,6 +490,27 @@ function colorDist(r: number, g: number, b: number, seed: Rgb) {
   const dg = g - seed.g;
   const db = b - seed.b;
   return Math.sqrt(dr * dr + dg * dg + db * db);
+}
+
+function isGrowableBackground(
+  r: number,
+  g: number,
+  b: number,
+  current: Rgb,
+  localThreshold: number,
+  wall: Rgb,
+  face: Rgb,
+) {
+  const distFace = colorDist(r, g, b, face);
+  const distWall = colorDist(r, g, b, wall);
+  if (distFace + 12 < distWall && distFace < 62) return false;
+  const y = luma(r, g, b);
+  const currentY = luma(current.r, current.g, current.b);
+  const dist = colorDist(r, g, b, current);
+  if (dist <= localThreshold) return true;
+  const lowChroma = chroma(r, g, b) < 52 && chroma(current.r, current.g, current.b) < 58;
+  if (lowChroma && Math.abs(y - currentY) <= 50 && y >= 40) return true;
+  return false;
 }
 
 function buildBackgroundMask(
@@ -427,24 +525,22 @@ function buildBackgroundMask(
   const qy = new Int32Array(width * height);
   let qs = 0;
   let qe = 0;
+  const wall = sampleWallBackground(data, width, height);
+  const faceSample = sampleRect(
+    data,
+    width,
+    width * 0.32,
+    height * 0.2,
+    width * 0.68,
+    height * 0.58,
+  );
+  const faceRgb = faceSample.rgb;
 
-  const seedPoints = [
-    [4, 4],
-    [width - 5, 4],
-    [4, height - 5],
-    [width - 5, height - 5],
-    [Math.floor(width / 2), 4],
-  ] as const;
-  const seed: Rgb = { r: 0, g: 0, b: 0 };
-  for (const [sx, sy] of seedPoints) {
-    const i = idx(sx, sy, width);
-    seed.r += data[i];
-    seed.g += data[i + 1];
-    seed.b += data[i + 2];
-  }
-  seed.r /= seedPoints.length;
-  seed.g /= seedPoints.length;
-  seed.b /= seedPoints.length;
+  const looksLikeWall = (r: number, g: number, b: number) => {
+    const y = luma(r, g, b);
+    if (colorDist(r, g, b, wall.rgb) <= 64) return true;
+    return chroma(r, g, b) < 50 && Math.abs(y - wall.mean) <= 56 && y >= 40;
+  };
 
   const enqueue = (x: number, y: number) => {
     const p = y * width + x;
@@ -455,13 +551,19 @@ function buildBackgroundMask(
     qe += 1;
   };
 
+  const seedIfWall = (x: number, y: number) => {
+    const i = idx(x, y, width);
+    if (looksLikeWall(data[i], data[i + 1], data[i + 2])) enqueue(x, y);
+  };
+
+  const edgeLimit = Math.floor(height * 0.74);
   for (let x = 0; x < width; x += 1) {
-    enqueue(x, 0);
-    enqueue(x, height - 1);
+    seedIfWall(x, 0);
+    seedIfWall(x, 1);
   }
-  for (let y = 0; y < height; y += 1) {
-    enqueue(0, y);
-    enqueue(width - 1, y);
+  for (let y = 0; y < edgeLimit; y += 1) {
+    seedIfWall(0, y);
+    seedIfWall(width - 1, y);
   }
 
   while (qs < qe) {
@@ -469,15 +571,87 @@ function buildBackgroundMask(
     const y = qy[qs];
     qs += 1;
     const i = idx(x, y, width);
-    if (colorDist(data[i], data[i + 1], data[i + 2], seed) > threshold) continue;
+    const current = { r: data[i], g: data[i + 1], b: data[i + 2] };
     mask[y * width + x] = 1;
-    if (x > 0) enqueue(x - 1, y);
-    if (x + 1 < width) enqueue(x + 1, y);
-    if (y > 0) enqueue(x, y - 1);
-    if (y + 1 < height) enqueue(x, y + 1);
+
+    const tryNeighbor = (nx: number, ny: number) => {
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) return;
+      const p = ny * width + nx;
+      if (visited[p]) return;
+      const ni = idx(nx, ny, width);
+      if (
+        !isGrowableBackground(
+          data[ni],
+          data[ni + 1],
+          data[ni + 2],
+          current,
+          threshold,
+          wall.rgb,
+          faceRgb,
+        )
+      ) {
+        return;
+      }
+      enqueue(nx, ny);
+    };
+
+    tryNeighbor(x - 1, y);
+    tryNeighbor(x + 1, y);
+    tryNeighbor(x, y - 1);
+    tryNeighbor(x, y + 1);
   }
 
-  return blurMask(mask, width, height, 3);
+  const face = findFaceBox(data, width, height);
+  if (face) {
+    const rx = Math.max(face.faceW * 0.58, 36);
+    const ry = Math.max(face.faceH * 0.62, 44);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const dx = (x - face.cx) / rx;
+        const dy = (y - face.cy) / ry;
+        if (dx * dx + dy * dy <= 1) mask[y * width + x] = 0;
+      }
+    }
+  }
+
+  let covered = 0;
+  for (let i = 0; i < mask.length; i += 1) if (mask[i] > 0.5) covered += 1;
+
+  if (covered < width * height * 0.06) {
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const i = idx(x, y, width);
+        const pixel = { r: data[i], g: data[i + 1], b: data[i + 2] };
+        const distWall = colorDist(pixel.r, pixel.g, pixel.b, wall.rgb);
+        const distFace = colorDist(pixel.r, pixel.g, pixel.b, faceRgb);
+        const yv = luma(pixel.r, pixel.g, pixel.b);
+        const nx = x / width - 0.5;
+        const inCenter = Math.abs(nx) < 0.26 && y > height * 0.12 && y < height * 0.7;
+        if (inCenter && distFace <= distWall) continue;
+        if (
+          distWall < 58 ||
+          (chroma(pixel.r, pixel.g, pixel.b) < 44 &&
+            Math.abs(yv - wall.mean) < 48 &&
+            yv > 45)
+        ) {
+          mask[y * width + x] = 1;
+        }
+      }
+    }
+    if (face) {
+      const rx = Math.max(face.faceW * 0.58, 36);
+      const ry = Math.max(face.faceH * 0.62, 44);
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const dx = (x - face.cx) / rx;
+          const dy = (y - face.cy) / ry;
+          if (dx * dx + dy * dy <= 1) mask[y * width + x] = 0;
+        }
+      }
+    }
+  }
+
+  return blurMask(mask, width, height, 2);
 }
 
 function blurMask(src: Float32Array, width: number, height: number, radius: number) {
@@ -528,11 +702,9 @@ export function applyFix(source: ImageData, adjustments: Adjustments): ImageData
   const dest = out.data;
   dest.set(src);
 
-  const corner = sampleRect(src, width, 0, 0, width * 0.1, height * 0.1);
-  const canWhiten =
-    adjustments.whiteBackground > 0.05 && corner.mean >= 125;
+  const canWhiten = adjustments.whiteBackground > 0.05;
   const mask = canWhiten
-    ? buildBackgroundMask(src, width, height, 48 + (1 - adjustments.whiteBackground) * 24)
+    ? buildBackgroundMask(src, width, height, 26 + adjustments.whiteBackground * 16)
     : null;
 
   const pivot = clamp(sampleRect(src, width, width * 0.3, height * 0.18, width * 0.7, height * 0.58).mean / 255, 0.28, 0.62);
@@ -541,7 +713,9 @@ export function applyFix(source: ImageData, adjustments: Adjustments): ImageData
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const i = idx(x, y, width);
-      const bg = mask ? mask[y * width + x] * adjustments.whiteBackground : 0;
+      const bg = mask
+        ? Math.pow(mask[y * width + x] * adjustments.whiteBackground, 0.62)
+        : 0;
       let r = src[i];
       let g = src[i + 1];
       let b = src[i + 2];
@@ -673,15 +847,15 @@ export function generateSampleRejectedPhoto(): Blob {
   if (!ctx) throw new Error("Canvas is not available in this browser.");
 
   const wall = ctx.createLinearGradient(0, 0, width, 0);
-  wall.addColorStop(0, "#6f6a62");
-  wall.addColorStop(0.55, "#8d877c");
-  wall.addColorStop(1, "#a39c90");
+  wall.addColorStop(0, "#9a9388");
+  wall.addColorStop(0.5, "#b7b0a4");
+  wall.addColorStop(1, "#c9c2b6");
   ctx.fillStyle = wall;
   ctx.fillRect(0, 0, width, height);
 
-  ctx.fillStyle = "rgba(30, 24, 18, 0.28)";
+  ctx.fillStyle = "rgba(70, 60, 48, 0.18)";
   ctx.beginPath();
-  ctx.ellipse(width * 0.5, height * 0.72, 230, 90, 0, 0, Math.PI * 2);
+  ctx.ellipse(width * 0.5, height * 0.7, 210, 80, 0, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.fillStyle = "#1d2430";
@@ -720,8 +894,8 @@ export function generateSampleRejectedPhoto(): Blob {
   ctx.arc(width * 0.5, height * 0.54, 28, 0.15 * Math.PI, 0.85 * Math.PI);
   ctx.stroke();
 
-  ctx.fillStyle = "rgba(0,0,0,0.38)";
-  ctx.fillRect(0, 0, width * 0.42, height);
+  ctx.fillStyle = "rgba(40, 32, 24, 0.22)";
+  ctx.fillRect(0, 0, width * 0.28, height);
 
   const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
   const raw = atob(dataUrl.split(",")[1]);

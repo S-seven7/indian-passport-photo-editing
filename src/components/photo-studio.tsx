@@ -394,8 +394,9 @@ export function PhotoStudio() {
               <CardHeader>
                 <CardTitle className="font-heading text-xl">Fine-tune</CardTitle>
                 <CardDescription>
-                  Auto-fix is conservative: exposure, evenness, contrast, and a
-                  white wall. It does not smooth skin or change your face.
+                Auto-fix always pushes the wall behind your head to plain white
+                (dark clothing at the bottom is ignored). It does not smooth skin
+                or change your face.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-5">
@@ -438,16 +439,11 @@ export function PhotoStudio() {
                 />
                 <SliderRow
                   label="Whiten background"
-                  hint={
-                    state.originalAnalysis.backgroundLuma < 132
-                      ? "Off — wall is too dark to replace safely"
-                      : state.adjustments.whiteBackground.toFixed(2)
-                  }
+                  hint={state.adjustments.whiteBackground.toFixed(2)}
                   min={0}
                   max={1}
                   step={0.02}
                   value={state.adjustments.whiteBackground}
-                  disabled={state.originalAnalysis.backgroundLuma < 132}
                   onChange={(whiteBackground) =>
                     void updateAdjustments({ ...state.adjustments, whiteBackground })
                   }
