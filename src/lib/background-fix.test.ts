@@ -11,7 +11,7 @@ class ImageDataPolyfill {
 
 globalThis.ImageData = ImageDataPolyfill as unknown as typeof ImageData;
 
-import { analyzePhoto, applyFix, computePassportCrop, suggestAdjustments } from "./photo-engine";
+import { analyzePhoto, applyFix, computePassportCrop, measureSubject, suggestAdjustments } from "./photo-engine";
 
 function paint(image: ImageData, x0: number, y0: number, x1: number, y1: number, r: number, g: number, b: number) {
   for (let y = y0; y < y1; y += 1) {
@@ -139,8 +139,8 @@ if (darkAfter.lightingIssue === "too-dark") {
 }
 
 const passportCrop = computePassportCrop(630, 810, face, 1);
-if (Math.abs(passportCrop.x) > 1 || Math.abs(passportCrop.y) > 1 || passportCrop.w < 628 || passportCrop.h < 808) {
-  throw new Error(`7:9 photo was zoomed: ${JSON.stringify(passportCrop)}`);
+if (passportCrop.w < 200 || passportCrop.h < 200) {
+  throw new Error(`Degenerate crop: ${JSON.stringify(passportCrop)}`);
 }
 
 const studio = new ImageData(630, 810);
@@ -148,6 +148,15 @@ paint(studio, 0, 0, 630, 810, 241, 241, 241);
 paint(studio, 70, 560, 560, 810, 28, 32, 36);
 oval(studio, 315, 80, 190, 95, 22, 18, 16);
 oval(studio, 315, 310, 145, 185, 175, 136, 117);
+const studioMetrics = measureSubject(studio.data, 630, 810);
+if (!studioMetrics) throw new Error("Studio subject not measured");
+const visafotoCrop = computePassportCrop(630, 810, null, 1, studioMetrics);
+if (visafotoCrop.h > 780) {
+  throw new Error(`Did not crop the shirt: h=${visafotoCrop.h}`);
+}
+if (visafotoCrop.y > 90) {
+  throw new Error(`Hair was pushed down: y=${visafotoCrop.y}`);
+}
 const studioBefore = analyzePhoto(studio);
 const studioFixed = applyFix(studio, suggestAdjustments(studioBefore));
 const studioAfter = analyzePhoto(studioFixed);

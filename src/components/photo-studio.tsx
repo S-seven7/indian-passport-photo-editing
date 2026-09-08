@@ -416,17 +416,21 @@ export function PhotoStudio() {
               <CardHeader>
                 <CardTitle className="font-heading text-xl">Fine-tune</CardTitle>
                 <CardDescription>
-                Auto-fix keeps hair and chin in frame, lifts a dark face, and
-                turns the wall behind you white. Drag “Include more of the photo”
-                if the head is still cropped.
+                Auto-fix crops to a visafoto-style head-and-shoulder frame,
+                exports 630×810, and turns the grey wall white. Drag the crop
+                slider if you want more or less of the chest.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-5">
                 <SliderRow
-                  label="Include more of the photo"
-                  hint={state.adjustments.headroom.toFixed(2)}
+                  label="Crop like the sample"
+                  hint={
+                    state.adjustments.headroom <= 1.05
+                      ? "tight 630×810"
+                      : "showing more"
+                  }
                   min={0.9}
-                  max={1.6}
+                  max={1.45}
                   step={0.02}
                   value={state.adjustments.headroom}
                   onChange={(headroom) =>

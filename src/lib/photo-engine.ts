@@ -268,35 +268,121 @@ export function findFaceBox(
   };
 }
 
+export type SubjectMetrics = {
+  hairTop: number;
+  headWidth: number;
+  headCx: number;
+  shoulderY: number;
+  backdropShare: number;
+};
+
+export function measureSubject(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+): SubjectMetrics | null {
+  const rowLeft = new Int32Array(height);
+  const rowRight = new Int32Array(height);
+  const rowWidth = new Int32Array(height);
+  let backdrop = 0;
+  let sampled = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    let left = -1;
+    let right = -1;
+    for (let x = 0; x < width; x += 2) {
+      const i = idx(x, y, width);
+      sampled += 1;
+      if (isLightBackdropPixel(data[i], data[i + 1], data[i + 2])) {
+        backdrop += 1;
+        continue;
+      }
+      if (left < 0) left = x;
+      right = x;
+    }
+    rowLeft[y] = left;
+    rowRight[y] = right;
+    rowWidth[y] = left < 0 ? 0 : right - left;
+  }
+
+  const backdropShare = sampled === 0 ? 0 : backdrop / sampled;
+  if (backdropShare < 0.08) return null;
+
+  let hairTop = -1;
+  for (let y = 0; y < height; y += 1) {
+    if (rowWidth[y] > width * 0.08) {
+      hairTop = y;
+      break;
+    }
+  }
+  if (hairTop < 0) return null;
+
+  let headWidth = 0;
+  let cxSum = 0;
+  let cxCount = 0;
+  const midStart = Math.floor(height * 0.12);
+  const midEnd = Math.floor(height * 0.55);
+  for (let y = midStart; y <= midEnd; y += 1) {
+    if (rowWidth[y] > headWidth) headWidth = rowWidth[y];
+    if (rowWidth[y] > 0) {
+      cxSum += (rowLeft[y] + rowRight[y]) / 2;
+      cxCount += 1;
+    }
+  }
+  if (headWidth < 8 || cxCount === 0) return null;
+  const headCx = cxSum / cxCount;
+
+  let shoulderY = height;
+  for (let y = Math.floor(height * 0.62); y < height; y += 1) {
+    if (rowWidth[y] > headWidth * 1.08) {
+      shoulderY = y;
+      break;
+    }
+  }
+
+  return { hairTop, headWidth, headCx, shoulderY, backdropShare };
+}
+
 export function isAlreadyPassportFrame(srcW: number, srcH: number) {
   const aspect = PASSPORT_WIDTH / PASSPORT_HEIGHT;
   return Math.abs(srcW / srcH - aspect) / aspect < 0.035;
 }
 
 export function defaultHeadroom(srcW: number, srcH: number) {
-  return isAlreadyPassportFrame(srcW, srcH) ? 1 : 1.22;
+  void srcW;
+  void srcH;
+  return 1;
 }
 
 export function computePassportCrop(
   srcW: number,
   srcH: number,
   face: FaceBox | null,
-  headroom = 1.2,
+  headroom = 1,
+  subject: SubjectMetrics | null = null,
 ) {
   const aspect = PASSPORT_WIDTH / PASSPORT_HEIGHT;
   const room = clamp(headroom, 0.85, 1.7);
 
-  // Already a 7:9 passport file: never zoom in. Tight studio shots (hair at
-  // the top edge) must not be cropped further.
-  if (isAlreadyPassportFrame(srcW, srcH)) {
-    if (srcW / srcH > aspect) {
-      const cropH = srcH;
-      const cropW = srcH * aspect;
-      return { x: (srcW - cropW) / 2, y: 0, w: cropW, h: cropH };
+  if (subject) {
+    const top = Math.max(0, subject.hairTop - srcH * 0.015);
+    const shoulderBottom =
+      subject.shoulderY < srcH
+        ? Math.min(srcH, subject.shoulderY + srcH * 0.06)
+        : Math.min(srcH, srcH * 0.84);
+    let cropH = Math.max(48, (shoulderBottom - top) * room);
+    let cropW = cropH * aspect;
+    if (cropW > srcW) {
+      cropW = srcW;
+      cropH = cropW / aspect;
     }
-    const cropW = srcW;
-    const cropH = Math.min(srcH, srcW / aspect);
-    return { x: 0, y: 0, w: cropW, h: cropH };
+    if (cropH > srcH) {
+      cropH = srcH;
+      cropW = cropH * aspect;
+    }
+    const x = clamp(subject.headCx - cropW / 2, 0, srcW - cropW);
+    const y = clamp(top, 0, srcH - cropH);
+    return { x, y, w: cropW, h: cropH };
   }
 
   if (!face) {
@@ -983,12 +1069,19 @@ export function bitmapToWorkingCanvas(bitmap: ImageBitmap, maxSide = 1600) {
   return canvas;
 }
 
-export function cropToPassport(source: HTMLCanvasElement, headroom = 1.2): HTMLCanvasElement {
+export function cropToPassport(source: HTMLCanvasElement, headroom = 1): HTMLCanvasElement {
   const ctx = source.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("Canvas is not available in this browser.");
   const imageData = ctx.getImageData(0, 0, source.width, source.height);
   const face = findFaceBox(imageData.data, source.width, source.height);
-  const crop = computePassportCrop(source.width, source.height, face, headroom);
+  const subject = measureSubject(imageData.data, source.width, source.height);
+  const crop = computePassportCrop(
+    source.width,
+    source.height,
+    face,
+    headroom,
+    subject,
+  );
 
   const canvas = document.createElement("canvas");
   canvas.width = PASSPORT_WIDTH;
