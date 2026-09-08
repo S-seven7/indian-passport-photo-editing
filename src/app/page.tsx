@@ -1,4 +1,7 @@
+import { Camera, PenLine } from "lucide-react";
 import { PhotoStudio } from "@/components/photo-studio";
+import { SignatureStudio } from "@/components/signature-studio";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 export default function Home() {
   return (
@@ -13,21 +16,38 @@ export default function Home() {
               Passport Photo Prep
             </h1>
             <p className="max-w-md text-sm leading-6 text-white/75">
-              Built for the Passport Seva lighting rejection: too light, too
-              dark, or a face that does not stand out from the wall behind you.
+              Prepare the two files GPSP 2.0 asks you to upload: an ICAO photo
+              and a scanned signature. Both stay in this browser.
             </p>
           </div>
         </div>
       </header>
 
       <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-10 px-4 py-8 sm:px-6 sm:py-10">
-        <PhotoStudio />
+        <Tabs defaultValue="signature" className="gap-6">
+          <TabsList className="h-11 w-full max-w-md">
+            <TabsTrigger value="photo" className="gap-2">
+              <Camera className="size-4" />
+              Photograph
+            </TabsTrigger>
+            <TabsTrigger value="signature" className="gap-2">
+              <PenLine className="size-4" />
+              Signature
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="photo">
+            <PhotoStudio />
+          </TabsContent>
+          <TabsContent value="signature">
+            <SignatureStudio />
+          </TabsContent>
+        </Tabs>
       </main>
 
       <footer className="mt-auto border-t border-foreground/10 px-4 py-6 text-center text-xs text-muted-foreground sm:px-6">
-        Technical file prep for passportindia.gov.in. Confirm the live portal
-        still asks for a 630×810 JPEG under 250 KB before you upload. This is
-        not a government website.
+        Technical file prep for passportindia.gov.in. Photo: 630×810 JPEG,
+        20–250 KB. Signature: JPEG under 100 KB. This is not a government
+        website.
       </footer>
     </div>
   );

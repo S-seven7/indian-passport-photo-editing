@@ -18,9 +18,9 @@ const fraunces = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "Passport Photo Prep — Indian Passport Seva lighting fixer",
+  title: "Passport Photo Prep — Indian Passport Seva photo & signature",
   description:
-    "Fix the Passport Seva “photo is too light or too dark” check. Measure exposure, even lighting, and background, then download a 630×810 JPEG for renewal.",
+    "Prepare GPSP 2.0 uploads in the browser: a 630×810 ICAO photo and a signature JPEG under 100 KB, with white paper and 80–85% fill.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

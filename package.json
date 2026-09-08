@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 4521",
     "lint": "eslint",
-    "test": "npx tsx src/lib/background-fix.test.ts"
+    "test": "npx tsx src/lib/background-fix.test.ts && npx tsx src/lib/signature-engine.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
