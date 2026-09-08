@@ -114,37 +114,28 @@ function buildInkMask(
   data: Uint8ClampedArray,
   width: number,
   height: number,
-): { mask: Uint8Array; paperLuma: number; corrected: Float32Array } {
+): { mask: Uint8Array; paperLuma: number } {
   const lumaMap = readLumaMap(data, width, height);
   const radius = Math.max(6, Math.round(Math.min(width, height) / 70));
   const blur = boxBlur(lumaMap, width, height, radius);
-  const corrected = new Float32Array(lumaMap.length);
   const sample: number[] = [];
   const step = Math.max(1, Math.floor(lumaMap.length / 4000));
-  for (let i = 0; i < lumaMap.length; i += step) {
-    const local = Math.max(blur[i], 1);
-    corrected[i] = (lumaMap[i] / local) * 220;
-    sample.push(lumaMap[i]);
-  }
-  for (let i = 0; i < lumaMap.length; i += 1) {
-    if (i % step === 0) continue;
-    const local = Math.max(blur[i], 1);
-    corrected[i] = (lumaMap[i] / local) * 220;
-  }
-
+  for (let i = 0; i < lumaMap.length; i += step) sample.push(lumaMap[i]);
   const paperLuma = percentile(sample, 0.9);
   const mask = new Uint8Array(lumaMap.length);
   for (let i = 0, p = 0; i < lumaMap.length; i += 1, p += 4) {
     const r = data[p];
     const g = data[p + 1];
     const b = data[p + 2];
-    const c = chroma(r, g, b);
-    const dark = lumaMap[i] < paperLuma - 18;
-    const ratioDark = corrected[i] < 188;
-    const blueInk = b > r + 12 && b > g + 4 && lumaMap[i] < paperLuma - 8;
-    mask[i] = dark && (ratioDark || c > 14 || blueInk || lumaMap[i] < paperLuma - 36) ? 1 : 0;
+    const y = lumaMap[i];
+    const local = Math.max(blur[i], 1);
+    const vsLocal = y + 14 < local && y < local * 0.86;
+    const coreDark = y < 82;
+    const blueInk = b > r + 12 && b > g + 4 && y + 10 < local && y < paperLuma - 8;
+    const chromatic = chroma(r, g, b) > 24 && vsLocal;
+    mask[i] = coreDark || blueInk || chromatic || (vsLocal && y < paperLuma - 12) ? 1 : 0;
   }
-  return { mask, paperLuma, corrected };
+  return { mask, paperLuma };
 }
 
 type Component = { id: number; area: number; minX: number; minY: number; maxX: number; maxY: number };
@@ -225,7 +216,7 @@ export function measureInk(image: ImageData): {
 
   const cleaned = new Uint8Array(mask.length);
   let inkPixels = 0;
-  let inkLumaSum = 0;
+  const inkLumas: number[] = [];
   let blueVotes = 0;
   let colorVotes = 0;
   let midtoneColor = 0;
@@ -244,7 +235,7 @@ export function measureInk(image: ImageData): {
     if (!keep.has(labels[i])) continue;
     cleaned[i] = 1;
     inkPixels += 1;
-    inkLumaSum += y;
+    inkLumas.push(y);
     if (b > r + 8) blueVotes += 1;
     if (c > 18) colorVotes += 1;
     const x = i % width;
@@ -277,7 +268,7 @@ export function measureInk(image: ImageData): {
       inkPixels,
     },
     paperLuma,
-    inkLuma: inkLumaSum / inkPixels,
+    inkLuma: percentile(inkLumas, 0.25),
     inkIsBlue: blueVotes > inkPixels * 0.35 && colorVotes > inkPixels * 0.2,
     strayMarks,
     looksLikePhoto,
@@ -549,6 +540,32 @@ export function placeSignature(
   return out;
 }
 
+function punchPlacedInk(image: ImageData, inkIsBlue: boolean, boost: number): ImageData {
+  const out = new ImageData(image.width, image.height);
+  const dest = out.data;
+  const data = image.data;
+  const target = inkIsBlue ? [18, 42, 118] : [16, 16, 18];
+  const amount = clamp(boost, 0.4, 1.4);
+  for (let p = 0; p < data.length; p += 4) {
+    const r = data[p];
+    const g = data[p + 1];
+    const b = data[p + 2];
+    const y = luma(r, g, b);
+    dest[p + 3] = 255;
+    if (y >= 242) {
+      dest[p] = 255;
+      dest[p + 1] = 255;
+      dest[p + 2] = 255;
+      continue;
+    }
+    const t = Math.pow(clamp((242 - y) / 170, 0, 1), 0.5) * amount;
+    dest[p] = Math.round(r + (target[0] - r) * t);
+    dest[p + 1] = Math.round(g + (target[1] - g) * t);
+    dest[p + 2] = Math.round(b + (target[2] - b) * t);
+  }
+  return out;
+}
+
 export function applySignatureFix(
   image: ImageData,
   adjustments: SignatureAdjustments = DEFAULT_SIGNATURE_ADJUSTMENTS,
@@ -565,7 +582,8 @@ export function applySignatureFix(
     }
     return blank;
   }
-  return placeSignature(cleaned, measured.box, adjustments.coverage);
+  const placed = placeSignature(cleaned, measured.box, adjustments.coverage);
+  return punchPlacedInk(placed, measured.inkIsBlue, adjustments.inkBoost);
 }
 
 export async function encodeSignatureJpeg(canvas: HTMLCanvasElement): Promise<Blob> {
@@ -619,8 +637,8 @@ export function generateSampleRejectedSignature(): Blob {
   ctx.ellipse(width * 0.5, height * 0.52, 280, 90, -0.12, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.strokeStyle = "rgba(92, 104, 138, 0.55)";
-  ctx.lineWidth = 7;
+  ctx.strokeStyle = "rgba(78, 92, 132, 0.62)";
+  ctx.lineWidth = 11;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.beginPath();

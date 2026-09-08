@@ -135,6 +135,47 @@ if (squareAfter.width / squareAfter.height < 2) {
   throw new Error("Square scan was not exported as a wide rectangle");
 }
 
+const shadowed = new ImageData(900, 500);
+fill(shadowed, 210, 206, 198);
+paint(shadowed, 180, 140, 720, 360, 176, 172, 164);
+paint(shadowed, 260, 230, 640, 268, 36, 40, 48);
+const shadowedFixed = applySignatureFix(shadowed, {
+  inkBoost: 1,
+  whitePaper: 1,
+  coverage: 0.825,
+});
+let greyBlob = 0;
+for (let p = 0; p < shadowedFixed.data.length; p += 4) {
+  const y =
+    0.2126 * shadowedFixed.data[p] +
+    0.7152 * shadowedFixed.data[p + 1] +
+    0.0722 * shadowedFixed.data[p + 2];
+  if (y > 55 && y < 220) greyBlob += 1;
+}
+if (greyBlob > 600 * 200 * 0.08) {
+  throw new Error(`Paper shadow became a grey blob (${greyBlob} mid-grey pixels)`);
+}
+const corner = (x: number, y: number) => {
+  const i = (y * shadowedFixed.width + x) * 4;
+  return (
+    0.2126 * shadowedFixed.data[i] +
+    0.7152 * shadowedFixed.data[i + 1] +
+    0.0722 * shadowedFixed.data[i + 2]
+  );
+};
+if (corner(2, 2) < 250 || corner(597, 197) < 250) {
+  throw new Error("Prepared corners are not white");
+}
+const shadowedAfter = analyzeSignature(shadowedFixed, { fileBytes: 30_000, mime: "image/jpeg" });
+if (shadowedAfter.failedCount > 0) {
+  throw new Error(
+    `Shadowed scan still fails: ${shadowedAfter.checks
+      .filter((item) => item.status === "fail")
+      .map((item) => item.id)
+      .join(", ")}`,
+  );
+}
+
 console.log(
   JSON.stringify(
     {
