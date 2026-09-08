@@ -6,7 +6,8 @@
     "dev": "next dev --hostname 127.0.0.1 --port 4521",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 4521",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "npx tsx src/lib/background-fix.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
