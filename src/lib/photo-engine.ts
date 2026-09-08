@@ -1,6 +1,4 @@
 import {
-  FACE_COVERAGE_MAX,
-  FACE_COVERAGE_MIN,
   MAX_FILE_BYTES,
   MIN_FILE_BYTES,
   PASSPORT_HEIGHT,
@@ -40,13 +38,26 @@ export type Adjustments = {
   contrast: number;
   evenLight: number;
   whiteBackground: number;
+  headroom: number;
 };
 
 export const NEUTRAL_ADJUSTMENTS: Adjustments = {
   exposure: 0,
   contrast: 0.12,
   evenLight: 0,
-  whiteBackground: 0,
+  whiteBackground: 1,
+  headroom: 1.2,
+};
+
+export type FaceBox = {
+  cx: number;
+  cy: number;
+  faceW: number;
+  faceH: number;
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
 };
 
 type Rgb = { r: number; g: number; b: number };
@@ -218,7 +229,7 @@ export function findFaceBox(
   data: Uint8ClampedArray,
   width: number,
   height: number,
-): { cx: number; cy: number; faceH: number; faceW: number } | null {
+): FaceBox | null {
   let minX = width;
   let minY = height;
   let maxX = 0;
@@ -250,32 +261,60 @@ export function findFaceBox(
     cy: sy / count,
     faceW,
     faceH,
+    minX,
+    minY,
+    maxX,
+    maxY,
   };
 }
 
 export function computePassportCrop(
   srcW: number,
   srcH: number,
-  face: { cx: number; cy: number; faceH: number; faceW: number } | null,
+  face: FaceBox | null,
+  headroom = 1.2,
 ) {
   const aspect = PASSPORT_WIDTH / PASSPORT_HEIGHT;
-  let cropW: number;
-  let cropH: number;
-  let cx = srcW / 2;
-  let cy = srcH / 2;
+  const room = clamp(headroom, 0.85, 1.7);
 
-  if (face) {
-    const targetCoverage = (FACE_COVERAGE_MIN + FACE_COVERAGE_MAX) / 2;
-    cropH = face.faceH / targetCoverage;
+  if (!face) {
+    let cropW: number;
+    let cropH: number;
+    if (srcW / srcH > aspect) {
+      cropH = srcH;
+      cropW = srcH * aspect;
+    } else {
+      cropW = srcW;
+      cropH = srcW / aspect;
+    }
+    return {
+      x: (srcW - cropW) / 2,
+      y: (srcH - cropH) / 2,
+      w: cropW,
+      h: cropH,
+    };
+  }
+
+  // Skin box is forehead-to-chin. Keep hair above and shoulders below.
+  const top = face.minY - face.faceH * 0.48;
+  const bottom = face.maxY + face.faceH * 0.58;
+  const left = face.minX - face.faceW * 0.28;
+  const right = face.maxX + face.faceW * 0.28;
+  const subjectW = Math.max(32, right - left);
+  const subjectH = Math.max(32, bottom - top);
+  const cx = (left + right) / 2;
+  const cy = (top + bottom) / 2;
+
+  let cropH = Math.max(subjectH, subjectW / aspect) * room;
+  let cropW = cropH * aspect;
+
+  if (cropW < subjectW) {
+    cropW = subjectW;
+    cropH = cropW / aspect;
+  }
+  if (cropH < subjectH) {
+    cropH = subjectH;
     cropW = cropH * aspect;
-    cx = face.cx;
-    cy = face.cy + face.faceH * 0.18;
-  } else if (srcW / srcH > aspect) {
-    cropH = srcH;
-    cropW = srcH * aspect;
-  } else {
-    cropW = srcW;
-    cropH = srcW / aspect;
   }
 
   if (cropW > srcW) {
@@ -292,7 +331,8 @@ export function computePassportCrop(
   let x = cx - cropW / 2;
   let y = cy - cropH / 2;
   x = clamp(x, 0, srcW - cropW);
-  y = clamp(y, 0, srcH - cropH);
+  // Prefer keeping the crown of the head, not the belly.
+  y = clamp(Math.min(y, Math.max(0, top)), 0, srcH - cropH);
 
   return { x, y, w: cropW, h: cropH };
 }
@@ -468,21 +508,28 @@ export function analyzePhoto(
 
 export function suggestAdjustments(analysis: PhotoAnalysis): Adjustments {
   let exposure = 0;
-  if (analysis.faceLuma < 118) {
-    exposure = clamp((125 - analysis.faceLuma) / 90, 0, 0.85);
+  if (analysis.faceLuma < 128) {
+    exposure = clamp((138 - analysis.faceLuma) / 68, 0, 1.25);
   } else if (analysis.faceLuma > 168) {
-    exposure = clamp((160 - analysis.faceLuma) / 90, -0.7, 0);
+    exposure = clamp((158 - analysis.faceLuma) / 80, -0.75, 0);
+  }
+  if (analysis.shadowClip > 0.08) {
+    exposure = clamp(exposure + analysis.shadowClip * 0.9, -0.75, 1.25);
   }
 
-  let contrast = 0.16;
-  if (analysis.faceStd < 22) contrast += (22 - analysis.faceStd) / 50;
-  contrast = clamp(contrast, 0.08, 0.55);
+  let contrast = 0.22;
+  if (analysis.faceStd < 24) contrast += (24 - analysis.faceStd) / 40;
+  contrast = clamp(contrast, 0.12, 0.58);
 
-  const evenLight = clamp((analysis.rightLuma - analysis.leftLuma) / 36, -1, 1);
+  const evenLight = clamp((analysis.rightLuma - analysis.leftLuma) / 22, -1, 1);
 
-  const whiteBackground = 1;
-
-  return { exposure, contrast, evenLight, whiteBackground };
+  return {
+    exposure,
+    contrast,
+    evenLight,
+    whiteBackground: 1,
+    headroom: 1.22,
+  };
 }
 
 function colorDist(r: number, g: number, b: number, seed: Rgb) {
@@ -690,9 +737,64 @@ function applyCurve(value: number, exposure: number, contrast: number, pivot: nu
   let t = value / 255;
   const gamma = 1 / Math.pow(2, exposure);
   t = Math.pow(Math.max(t, 0), gamma);
-  const c = 1 + contrast * 1.6;
+  const lift = Math.max(0, exposure) * 0.42;
+  t = t + lift * (1 - t) * (1 - t);
+  const c = 1 + contrast * 1.85;
   t = (t - pivot) * c + pivot;
   return clamp(t * 255, 0, 255);
+}
+
+function subjectPercentile(
+  data: Uint8ClampedArray,
+  mask: Float32Array | null,
+  width: number,
+  height: number,
+  p: number,
+) {
+  const hist = new Uint32Array(256);
+  let count = 0;
+  for (let y = 0; y < height; y += 2) {
+    for (let x = 0; x < width; x += 2) {
+      if (mask && mask[y * width + x] > 0.4) continue;
+      const i = idx(x, y, width);
+      hist[Math.round(luma(data[i], data[i + 1], data[i + 2]))] += 1;
+      count += 1;
+    }
+  }
+  if (count === 0) return 128;
+  const target = count * p;
+  let acc = 0;
+  for (let i = 0; i < 256; i += 1) {
+    acc += hist[i];
+    if (acc >= target) return i;
+  }
+  return 255;
+}
+
+function unsharpSubject(
+  dest: Uint8ClampedArray,
+  mask: Float32Array | null,
+  width: number,
+  height: number,
+  amount: number,
+) {
+  const copy = new Uint8ClampedArray(dest);
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      if (mask && mask[y * width + x] > 0.55) continue;
+      const i = idx(x, y, width);
+      for (let c = 0; c < 3; c += 1) {
+        let mean = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            mean += copy[idx(x + dx, y + dy, width) + c];
+          }
+        }
+        mean /= 9;
+        dest[i + c] = clamp(copy[i + c] + amount * (copy[i + c] - mean), 0, 255);
+      }
+    }
+  }
 }
 
 export function applyFix(source: ImageData, adjustments: Adjustments): ImageData {
@@ -704,33 +806,46 @@ export function applyFix(source: ImageData, adjustments: Adjustments): ImageData
 
   const canWhiten = adjustments.whiteBackground > 0.05;
   const mask = canWhiten
-    ? buildBackgroundMask(src, width, height, 26 + adjustments.whiteBackground * 16)
+    ? buildBackgroundMask(src, width, height, 28 + adjustments.whiteBackground * 18)
     : null;
 
-  const pivot = clamp(sampleRect(src, width, width * 0.3, height * 0.18, width * 0.7, height * 0.58).mean / 255, 0.28, 0.62);
-  const sideBoost = (adjustments.evenLight || 0) * 0.22;
+  const low = subjectPercentile(src, mask, width, height, 0.08);
+  const high = subjectPercentile(src, mask, width, height, 0.94);
+  const levelSpan = Math.max(18, high - low);
+  const levelStrength = levelSpan < 40 || low < 55 || high > 210 ? 0.72 : 0.35;
+
+  const pivot = clamp(
+    sampleRect(src, width, width * 0.3, height * 0.18, width * 0.7, height * 0.58).mean / 255,
+    0.28,
+    0.62,
+  );
+  const sideBoost = (adjustments.evenLight || 0) * 0.42;
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const i = idx(x, y, width);
-      const bg = mask
-        ? Math.pow(mask[y * width + x] * adjustments.whiteBackground, 0.62)
-        : 0;
+      const maskVal = mask ? mask[y * width + x] : 0;
+      const bg = Math.pow(maskVal * adjustments.whiteBackground, 0.5);
       let r = src[i];
       let g = src[i + 1];
       let b = src[i + 2];
 
-      if (bg < 0.92) {
+      if (bg < 0.88) {
         const even = ((0.5 - x / width) * 2) * sideBoost * 255;
-        r = applyCurve(r + even, adjustments.exposure, adjustments.contrast, pivot);
-        g = applyCurve(g + even, adjustments.exposure, adjustments.contrast, pivot);
-        b = applyCurve(b + even, adjustments.exposure, adjustments.contrast, pivot);
+        const y0 = luma(r, g, b);
+        const leveled = ((y0 - low) / levelSpan) * 160 + 48;
+        const y1 = y0 * (1 - levelStrength) + leveled * levelStrength;
+        const scale = y0 > 1 ? y1 / y0 : 1;
+        r = applyCurve(r * scale + even, adjustments.exposure, adjustments.contrast, pivot);
+        g = applyCurve(g * scale + even, adjustments.exposure, adjustments.contrast, pivot);
+        b = applyCurve(b * scale + even, adjustments.exposure, adjustments.contrast, pivot);
       }
 
       if (bg > 0) {
-        r = r * (1 - bg) + 255 * bg;
-        g = g * (1 - bg) + 255 * bg;
-        b = b * (1 - bg) + 255 * bg;
+        const white = Math.min(1, bg * 1.18);
+        r = r * (1 - white) + 255 * white;
+        g = g * (1 - white) + 255 * white;
+        b = b * (1 - white) + 255 * white;
       }
 
       dest[i] = r;
@@ -740,6 +855,7 @@ export function applyFix(source: ImageData, adjustments: Adjustments): ImageData
     }
   }
 
+  unsharpSubject(dest, mask, width, height, 0.32);
   return out;
 }
 
@@ -760,12 +876,12 @@ export function bitmapToWorkingCanvas(bitmap: ImageBitmap, maxSide = 1600) {
   return canvas;
 }
 
-export function cropToPassport(source: HTMLCanvasElement): HTMLCanvasElement {
+export function cropToPassport(source: HTMLCanvasElement, headroom = 1.2): HTMLCanvasElement {
   const ctx = source.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("Canvas is not available in this browser.");
   const imageData = ctx.getImageData(0, 0, source.width, source.height);
   const face = findFaceBox(imageData.data, source.width, source.height);
-  const crop = computePassportCrop(source.width, source.height, face);
+  const crop = computePassportCrop(source.width, source.height, face, headroom);
 
   const canvas = document.createElement("canvas");
   canvas.width = PASSPORT_WIDTH;

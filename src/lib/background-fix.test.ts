@@ -11,7 +11,7 @@ class ImageDataPolyfill {
 
 globalThis.ImageData = ImageDataPolyfill as unknown as typeof ImageData;
 
-import { analyzePhoto, applyFix } from "./photo-engine";
+import { analyzePhoto, applyFix, computePassportCrop, suggestAdjustments } from "./photo-engine";
 
 function paint(image: ImageData, x0: number, y0: number, x1: number, y1: number, r: number, g: number, b: number) {
   for (let y = y0; y < y1; y += 1) {
@@ -61,6 +61,7 @@ const fixed = applyFix(photo, {
   contrast: 0.2,
   evenLight: 0,
   whiteBackground: 1,
+  headroom: 1.22,
 });
 const after = analyzePhoto(fixed);
 
@@ -95,12 +96,46 @@ const greyFixed = applyFix(greyWall, {
   contrast: 0.18,
   evenLight: 0,
   whiteBackground: 1,
+  headroom: 1.22,
 });
 const greyAfter = analyzePhoto(greyFixed);
 if (greyAfter.backgroundLuma < 210 || standout(greyAfter)?.status === "fail") {
   throw new Error(
     `Grey wall still fails: luma ${greyAfter.backgroundLuma} ${standout(greyAfter)?.status}`,
   );
+}
+
+const face = {
+  cx: 400,
+  cy: 360,
+  faceW: 220,
+  faceH: 280,
+  minX: 290,
+  minY: 220,
+  maxX: 510,
+  maxY: 500,
+};
+const crop = computePassportCrop(900, 1200, face, 1.22);
+const hairTop = face.minY - face.faceH * 0.48;
+if (crop.y > hairTop + 2) {
+  throw new Error(`Crop cuts hair: y=${crop.y} hairTop=${hairTop}`);
+}
+if (crop.y + crop.h < face.maxY - 2) {
+  throw new Error(`Crop cuts chin: bottom=${crop.y + crop.h} chin=${face.maxY}`);
+}
+
+const dark = new ImageData(630, 810);
+paint(dark, 0, 0, 630, 810, 150, 146, 140);
+paint(dark, 90, 560, 540, 810, 24, 28, 36);
+oval(dark, 315, 305, 140, 180, 72, 46, 34);
+const darkBefore = analyzePhoto(dark);
+const darkFixed = applyFix(dark, suggestAdjustments(darkBefore));
+const darkAfter = analyzePhoto(darkFixed);
+if (darkAfter.faceLuma < 100) {
+  throw new Error(`Dark face stayed too dark: ${darkAfter.faceLuma}`);
+}
+if (darkAfter.lightingIssue === "too-dark") {
+  throw new Error("Lighting issue still too-dark after auto-fix");
 }
 
 console.log("ok");

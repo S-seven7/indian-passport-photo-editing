@@ -88,6 +88,7 @@ export function PhotoStudio() {
   const [error, setError] = useState<string | null>(null);
   const [state, setState] = useState<StudioState | null>(null);
   const cropRef = useRef<ImageData | null>(null);
+  const workingRef = useRef<HTMLCanvasElement | null>(null);
   const urlsRef = useRef<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -103,6 +104,17 @@ export function PhotoStudio() {
 
   useEffect(() => {
     return () => resetUrls();
+  }, []);
+
+  const cropWorking = useCallback((headroom: number) => {
+    const working = workingRef.current;
+    if (!working) throw new Error("Photo is not loaded yet.");
+    const passport = cropToPassport(working, headroom);
+    const crop = passport
+      .getContext("2d", { willReadFrequently: true })!
+      .getImageData(0, 0, PASSPORT_WIDTH, PASSPORT_HEIGHT);
+    cropRef.current = crop;
+    return { passport, crop };
   }, []);
 
   const renderFromCrop = useCallback(async (crop: ImageData, adjustments: Adjustments) => {
@@ -125,25 +137,30 @@ export function PhotoStudio() {
         const bitmap = await loadImageBitmap(file);
         const working = bitmapToWorkingCanvas(bitmap);
         bitmap.close();
-        const passport = cropToPassport(working);
-        const crop = passport
+        workingRef.current = working;
+        const draft = cropToPassport(working, 1.22);
+        const draftCrop = draft
           .getContext("2d", { willReadFrequently: true })!
           .getImageData(0, 0, PASSPORT_WIDTH, PASSPORT_HEIGHT);
-        cropRef.current = crop;
-
-        const originalAnalysis = analyzePhoto(crop, {
+        const originalAnalysis = analyzePhoto(draftCrop, {
           fileBytes: file instanceof File ? file.size : undefined,
           mime: file.type || "image/jpeg",
         });
         const adjustments = suggestAdjustments(originalAnalysis);
+        const { crop } = cropWorking(adjustments.headroom);
         setBusy("render");
-        const originalUrl = rememberUrl(
-          URL.createObjectURL(await encodePassportJpeg(passport)),
+        const preview = document.createElement("canvas");
+        const scale = Math.min(1, 720 / Math.max(working.width, working.height));
+        preview.width = Math.max(1, Math.round(working.width * scale));
+        preview.height = Math.max(1, Math.round(working.height * scale));
+        preview.getContext("2d")!.drawImage(working, 0, 0, preview.width, preview.height);
+        const originalPreview = rememberUrl(
+          URL.createObjectURL(await encodePassportJpeg(preview)),
         );
         const fixed = await renderFromCrop(crop, adjustments);
         setState({
           fileName,
-          originalUrl,
+          originalUrl: originalPreview,
           fixedUrl: fixed.url,
           originalAnalysis,
           fixedAnalysis: fixed.analysis,
@@ -157,7 +174,7 @@ export function PhotoStudio() {
         setBusy("idle");
       }
     },
-    [renderFromCrop],
+    [cropWorking, renderFromCrop],
   );
 
   const onFiles = (files: FileList | null) => {
@@ -171,11 +188,14 @@ export function PhotoStudio() {
   };
 
   const updateAdjustments = async (next: Adjustments) => {
-    if (!cropRef.current || !state) return;
+    if (!workingRef.current || !state) return;
     setState({ ...state, adjustments: next });
     setBusy("render");
     try {
-      const fixed = await renderFromCrop(cropRef.current, next);
+      const headroomChanged = next.headroom !== state.adjustments.headroom;
+      const crop = headroomChanged ? cropWorking(next.headroom).crop : cropRef.current;
+      if (!crop) return;
+      const fixed = await renderFromCrop(crop, next);
       setState((current) =>
         current
           ? {
@@ -297,14 +317,14 @@ export function PhotoStudio() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <figure className="overflow-hidden rounded-xl bg-white ring-1 ring-foreground/10">
                   <div className="flex items-center justify-between px-3 py-2 text-xs text-muted-foreground">
-                    <span>Before lighting fix</span>
-                    <span>cropped to 630×810</span>
+                    <span>Your upload</span>
+                    <span>full frame</span>
                   </div>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={state.originalUrl}
-                    alt="Original photo cropped to passport frame"
-                    className="aspect-[7/9] w-full bg-[#f4f4f4] object-cover"
+                    alt="Original uploaded photo"
+                    className="aspect-[7/9] w-full bg-[#f4f4f4] object-contain"
                   />
                 </figure>
                 <figure className="overflow-hidden rounded-xl bg-white ring-1 ring-foreground/10">
@@ -318,7 +338,7 @@ export function PhotoStudio() {
                   <img
                     src={state.fixedUrl}
                     alt="Lighting-corrected passport photo"
-                    className="aspect-[7/9] w-full bg-white object-cover"
+                    className="aspect-[7/9] w-full bg-white object-contain"
                   />
                 </figure>
               </div>
@@ -394,12 +414,23 @@ export function PhotoStudio() {
               <CardHeader>
                 <CardTitle className="font-heading text-xl">Fine-tune</CardTitle>
                 <CardDescription>
-                Auto-fix always pushes the wall behind your head to plain white
-                (dark clothing at the bottom is ignored). It does not smooth skin
-                or change your face.
+                Auto-fix keeps hair and chin in frame, lifts a dark face, and
+                turns the wall behind you white. Drag “Include more of the photo”
+                if the head is still cropped.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-5">
+                <SliderRow
+                  label="Include more of the photo"
+                  hint={state.adjustments.headroom.toFixed(2)}
+                  min={0.9}
+                  max={1.6}
+                  step={0.02}
+                  value={state.adjustments.headroom}
+                  onChange={(headroom) =>
+                    void updateAdjustments({ ...state.adjustments, headroom })
+                  }
+                />
                 <SliderRow
                   label="Exposure"
                   hint={
@@ -407,8 +438,8 @@ export function PhotoStudio() {
                       ? `+${state.adjustments.exposure.toFixed(2)} stop`
                       : `${state.adjustments.exposure.toFixed(2)} stop`
                   }
-                  min={-0.7}
-                  max={0.9}
+                  min={-0.75}
+                  max={1.25}
                   step={0.02}
                   value={state.adjustments.exposure}
                   onChange={(exposure) =>
@@ -464,7 +495,12 @@ export function PhotoStudio() {
                   </Button>
                   <Button
                     variant="outline"
-                    onClick={() => void updateAdjustments(NEUTRAL_ADJUSTMENTS)}
+                    onClick={() =>
+                      void updateAdjustments({
+                        ...NEUTRAL_ADJUSTMENTS,
+                        headroom: state.adjustments.headroom,
+                      })
+                    }
                   >
                     Reset look
                   </Button>
@@ -489,13 +525,12 @@ export function PhotoStudio() {
         </TabsList>
         <TabsContent value="fix" className="max-w-3xl text-sm leading-6 text-muted-foreground">
           <p>
-            GPSP / Passport Seva 2.0 runs an automated lighting check. If the
-            file is dim, blown out, or your face blends into a grey wall, you get
-            exactly the error above. This prep tool measures those same things,
-            lifts or lowers exposure, equalises left/right light, restores local
-            contrast so eyes and mouth stay readable, replaces a light wall with
-            plain white, crops to 7:9, and writes a JPEG at 630×810 between 20
-            and 250 KB.
+            GPSP / Passport Seva 2.0 rejects photos that are too dark, too
+            light, or where the face blends into the wall. This tool keeps hair
+            and chin in the 630×810 frame, lifts a dim face, evens left/right
+            light, and replaces a grey or cream wall with plain white. If the
+            portal still rejects after that, retake facing a window — a file
+            that was captured in deep shadow cannot be invented into even light.
           </p>
         </TabsContent>
         <TabsContent value="retake" className="max-w-3xl text-sm leading-6 text-muted-foreground">
