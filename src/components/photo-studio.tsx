@@ -31,6 +31,7 @@ import {
   bitmapToWorkingCanvas,
   canvasFromImageData,
   cropToPassport,
+  defaultHeadroom,
   encodePassportJpeg,
   formatBytes,
   generateSampleRejectedPhoto,
@@ -138,7 +139,8 @@ export function PhotoStudio() {
         const working = bitmapToWorkingCanvas(bitmap);
         bitmap.close();
         workingRef.current = working;
-        const draft = cropToPassport(working, 1.22);
+        const headroom = defaultHeadroom(working.width, working.height);
+        const draft = cropToPassport(working, headroom);
         const draftCrop = draft
           .getContext("2d", { willReadFrequently: true })!
           .getImageData(0, 0, PASSPORT_WIDTH, PASSPORT_HEIGHT);
@@ -146,7 +148,7 @@ export function PhotoStudio() {
           fileBytes: file instanceof File ? file.size : undefined,
           mime: file.type || "image/jpeg",
         });
-        const adjustments = suggestAdjustments(originalAnalysis);
+        const adjustments = { ...suggestAdjustments(originalAnalysis), headroom };
         const { crop } = cropWorking(adjustments.headroom);
         setBusy("render");
         const preview = document.createElement("canvas");
@@ -526,11 +528,12 @@ export function PhotoStudio() {
         <TabsContent value="fix" className="max-w-3xl text-sm leading-6 text-muted-foreground">
           <p>
             GPSP / Passport Seva 2.0 rejects photos that are too dark, too
-            light, or where the face blends into the wall. This tool keeps hair
-            and chin in the 630×810 frame, lifts a dim face, evens left/right
-            light, and replaces a grey or cream wall with plain white. If the
-            portal still rejects after that, retake facing a window — a file
-            that was captured in deep shadow cannot be invented into even light.
+            light, or where the face blends into the wall. A studio grey
+            backdrop (around 240) looks white to the eye but fails the portal —
+            this tool replaces it with pure white without recropping an
+            already 630×810 file. If hair is already at the top of your
+            original, we cannot invent the missing pixels; retake with a little
+            space above the head.
           </p>
         </TabsContent>
         <TabsContent value="retake" className="max-w-3xl text-sm leading-6 text-muted-foreground">

@@ -268,6 +268,15 @@ export function findFaceBox(
   };
 }
 
+export function isAlreadyPassportFrame(srcW: number, srcH: number) {
+  const aspect = PASSPORT_WIDTH / PASSPORT_HEIGHT;
+  return Math.abs(srcW / srcH - aspect) / aspect < 0.035;
+}
+
+export function defaultHeadroom(srcW: number, srcH: number) {
+  return isAlreadyPassportFrame(srcW, srcH) ? 1 : 1.22;
+}
+
 export function computePassportCrop(
   srcW: number,
   srcH: number,
@@ -276,6 +285,19 @@ export function computePassportCrop(
 ) {
   const aspect = PASSPORT_WIDTH / PASSPORT_HEIGHT;
   const room = clamp(headroom, 0.85, 1.7);
+
+  // Already a 7:9 passport file: never zoom in. Tight studio shots (hair at
+  // the top edge) must not be cropped further.
+  if (isAlreadyPassportFrame(srcW, srcH)) {
+    if (srcW / srcH > aspect) {
+      const cropH = srcH;
+      const cropW = srcH * aspect;
+      return { x: (srcW - cropW) / 2, y: 0, w: cropW, h: cropH };
+    }
+    const cropW = srcW;
+    const cropH = Math.min(srcH, srcW / aspect);
+    return { x: 0, y: 0, w: cropW, h: cropH };
+  }
 
   if (!face) {
     let cropW: number;
@@ -433,9 +455,9 @@ export function analyzePhoto(
     check(
       "background",
       "Light / white background",
-      backgroundIsLight && bgSpread < 32 ? "pass" : backgroundLuma >= 170 ? "warn" : "fail",
+      backgroundIsLight && (bgSpread < 32 || backgroundLuma >= 248) ? "pass" : backgroundLuma >= 170 ? "warn" : "fail",
       backgroundIsLight
-        ? bgSpread >= 32
+        ? bgSpread >= 32 && backgroundLuma < 248
           ? "The wall is light but uneven — a leftover shadow or colour cast is still visible."
           : "The area behind the head reads as a plain light backdrop."
         : "Grey, cream, or shadowed walls fail Passport Seva. Use Whiten background to push that wall to white.",
@@ -507,29 +529,91 @@ export function analyzePhoto(
 }
 
 export function suggestAdjustments(analysis: PhotoAnalysis): Adjustments {
+  const faceOk = analysis.faceLuma >= 118 && analysis.faceLuma <= 168;
   let exposure = 0;
-  if (analysis.faceLuma < 128) {
-    exposure = clamp((138 - analysis.faceLuma) / 68, 0, 1.25);
-  } else if (analysis.faceLuma > 168) {
-    exposure = clamp((158 - analysis.faceLuma) / 80, -0.75, 0);
+  if (!faceOk) {
+    if (analysis.faceLuma < 118) {
+      exposure = clamp((138 - analysis.faceLuma) / 68, 0, 1.25);
+    } else {
+      exposure = clamp((158 - analysis.faceLuma) / 80, -0.75, 0);
+    }
   }
-  if (analysis.shadowClip > 0.08) {
+  if (analysis.shadowClip > 0.1 && analysis.faceLuma < 120) {
     exposure = clamp(exposure + analysis.shadowClip * 0.9, -0.75, 1.25);
   }
 
-  let contrast = 0.22;
-  if (analysis.faceStd < 24) contrast += (24 - analysis.faceStd) / 40;
-  contrast = clamp(contrast, 0.12, 0.58);
+  const sideDiff = analysis.rightLuma - analysis.leftLuma;
+  const evenLight = Math.abs(sideDiff) < 14 ? 0 : clamp(sideDiff / 22, -1, 1);
 
-  const evenLight = clamp((analysis.rightLuma - analysis.leftLuma) / 22, -1, 1);
+  let contrast = 0.08;
+  if (!faceOk || analysis.faceStd < 15) {
+    contrast = clamp(0.2 + Math.max(0, 18 - analysis.faceStd) / 40, 0.08, 0.5);
+  }
 
   return {
     exposure,
     contrast,
     evenLight,
     whiteBackground: 1,
-    headroom: 1.22,
+    headroom: 1,
   };
+}
+
+function isLightBackdropPixel(r: number, g: number, b: number) {
+  return luma(r, g, b) >= 186 && chroma(r, g, b) <= 30;
+}
+
+/** Edge-connected light grey/white wall → the visafoto-style pure white key. */
+function buildLightBackdropMask(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+): Float32Array {
+  const mask = new Float32Array(width * height);
+  const visited = new Uint8Array(width * height);
+  const qx = new Int32Array(width * height);
+  const qy = new Int32Array(width * height);
+  let qs = 0;
+  let qe = 0;
+
+  const enqueue = (x: number, y: number) => {
+    const p = y * width + x;
+    if (visited[p]) return;
+    visited[p] = 1;
+    qx[qe] = x;
+    qy[qe] = y;
+    qe += 1;
+  };
+
+  const seedIfBackdrop = (x: number, y: number) => {
+    const i = idx(x, y, width);
+    if (isLightBackdropPixel(data[i], data[i + 1], data[i + 2])) enqueue(x, y);
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    seedIfBackdrop(x, 0);
+    seedIfBackdrop(x, 1);
+    seedIfBackdrop(x, height - 1);
+  }
+  for (let y = 0; y < height; y += 1) {
+    seedIfBackdrop(0, y);
+    seedIfBackdrop(width - 1, y);
+  }
+
+  while (qs < qe) {
+    const x = qx[qs];
+    const y = qy[qs];
+    qs += 1;
+    const i = idx(x, y, width);
+    if (!isLightBackdropPixel(data[i], data[i + 1], data[i + 2])) continue;
+    mask[y * width + x] = 1;
+    if (x > 0) enqueue(x - 1, y);
+    if (x + 1 < width) enqueue(x + 1, y);
+    if (y > 0) enqueue(x, y - 1);
+    if (y + 1 < height) enqueue(x, y + 1);
+  }
+
+  return blurMask(mask, width, height, 1);
 }
 
 function colorDist(r: number, g: number, b: number, seed: Rgb) {
@@ -805,32 +889,55 @@ export function applyFix(source: ImageData, adjustments: Adjustments): ImageData
   dest.set(src);
 
   const canWhiten = adjustments.whiteBackground > 0.05;
-  const mask = canWhiten
-    ? buildBackgroundMask(src, width, height, 28 + adjustments.whiteBackground * 18)
-    : null;
+  let mask: Float32Array | null = null;
+  if (canWhiten) {
+    const light = buildLightBackdropMask(src, width, height);
+    let covered = 0;
+    for (let i = 0; i < light.length; i += 1) if (light[i] > 0.5) covered += 1;
+    mask =
+      covered >= width * height * 0.08
+        ? light
+        : buildBackgroundMask(src, width, height, 28 + adjustments.whiteBackground * 18);
+  }
+
+  const faceMean = sampleRect(
+    src,
+    width,
+    width * 0.3,
+    height * 0.18,
+    width * 0.7,
+    height * 0.58,
+  ).mean;
+  const faceAlreadyOk = faceMean >= 118 && faceMean <= 168;
+  const skipLevels = faceAlreadyOk && Math.abs(adjustments.exposure) < 0.12;
+  const sideBoost = (adjustments.evenLight || 0) * 0.42;
+  const retouchSubject =
+    !skipLevels ||
+    Math.abs(adjustments.exposure) >= 0.08 ||
+    adjustments.contrast > 0.12 ||
+    Math.abs(sideBoost) > 0.02;
 
   const low = subjectPercentile(src, mask, width, height, 0.08);
   const high = subjectPercentile(src, mask, width, height, 0.94);
   const levelSpan = Math.max(18, high - low);
-  const levelStrength = levelSpan < 40 || low < 55 || high > 210 ? 0.72 : 0.35;
+  const levelStrength = skipLevels
+    ? 0
+    : levelSpan < 40 || low < 55 || high > 210
+      ? 0.72
+      : 0.35;
 
-  const pivot = clamp(
-    sampleRect(src, width, width * 0.3, height * 0.18, width * 0.7, height * 0.58).mean / 255,
-    0.28,
-    0.62,
-  );
-  const sideBoost = (adjustments.evenLight || 0) * 0.42;
+  const pivot = clamp(faceMean / 255, 0.28, 0.62);
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const i = idx(x, y, width);
       const maskVal = mask ? mask[y * width + x] : 0;
-      const bg = Math.pow(maskVal * adjustments.whiteBackground, 0.5);
+      const bg = maskVal * adjustments.whiteBackground;
       let r = src[i];
       let g = src[i + 1];
       let b = src[i + 2];
 
-      if (bg < 0.88) {
+      if (bg < 0.5 && retouchSubject) {
         const even = ((0.5 - x / width) * 2) * sideBoost * 255;
         const y0 = luma(r, g, b);
         const leveled = ((y0 - low) / levelSpan) * 160 + 48;
@@ -841,8 +948,8 @@ export function applyFix(source: ImageData, adjustments: Adjustments): ImageData
         b = applyCurve(b * scale + even, adjustments.exposure, adjustments.contrast, pivot);
       }
 
-      if (bg > 0) {
-        const white = Math.min(1, bg * 1.18);
+      if (bg > 0.2) {
+        const white = Math.min(1, (bg - 0.2) / 0.55);
         r = r * (1 - white) + 255 * white;
         g = g * (1 - white) + 255 * white;
         b = b * (1 - white) + 255 * white;
@@ -855,7 +962,7 @@ export function applyFix(source: ImageData, adjustments: Adjustments): ImageData
     }
   }
 
-  unsharpSubject(dest, mask, width, height, 0.32);
+  unsharpSubject(dest, mask, width, height, skipLevels ? 0.1 : 0.32);
   return out;
 }
 

@@ -138,4 +138,29 @@ if (darkAfter.lightingIssue === "too-dark") {
   throw new Error("Lighting issue still too-dark after auto-fix");
 }
 
+const passportCrop = computePassportCrop(630, 810, face, 1);
+if (Math.abs(passportCrop.x) > 1 || Math.abs(passportCrop.y) > 1 || passportCrop.w < 628 || passportCrop.h < 808) {
+  throw new Error(`7:9 photo was zoomed: ${JSON.stringify(passportCrop)}`);
+}
+
+const studio = new ImageData(630, 810);
+paint(studio, 0, 0, 630, 810, 241, 241, 241);
+paint(studio, 70, 560, 560, 810, 28, 32, 36);
+oval(studio, 315, 80, 190, 95, 22, 18, 16);
+oval(studio, 315, 310, 145, 185, 175, 136, 117);
+const studioBefore = analyzePhoto(studio);
+const studioFixed = applyFix(studio, suggestAdjustments(studioBefore));
+const studioAfter = analyzePhoto(studioFixed);
+if (studioAfter.backgroundLuma < 248) {
+  throw new Error(`Studio grey wall stayed ${studioAfter.backgroundLuma}`);
+}
+if (Math.abs(studioAfter.faceLuma - studioBefore.faceLuma) > 10) {
+  throw new Error(
+    `Face luma moved too much ${studioBefore.faceLuma} → ${studioAfter.faceLuma}`,
+  );
+}
+if (standout(studioAfter)?.status === "fail") {
+  throw new Error(`Studio standout failed: ${standout(studioAfter)?.detail}`);
+}
+
 console.log("ok");
